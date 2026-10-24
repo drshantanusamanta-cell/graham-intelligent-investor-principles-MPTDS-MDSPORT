@@ -11,13 +11,13 @@ A Streamlit app that screens NSE/BSE companies with two complementary frameworks
 | **Graham** | Does it pass Benjamin Graham's defensive / enterprising screens, and is it cheap on his formulas? | NET-NET · DEFENSIVE PASS · ENTERPRISING PASS · FAILS GRAHAM |
 
 ## Finding a company
-Type either a ticker (`TCS`, `SHRIRAMFIN`, a BSE code) **or just the company's name** (`Shriram Finance`, `asian paints`, `sbi`). Names are converted to the NSE symbol automatically:
+The search box works the same way as the Forward Matrix and Fair Value apps:
 
-1. a built-in list of common short-forms (SBI, L&T, HUL, RIL, M&M…),
-2. Screener.in's company search,
-3. Yahoo Finance search as a fallback.
+- **An exact NSE symbol** in any case, with or without `.NS` (`tcs`, `HDFCBANK.NS`, `m&m`), a **BSE code** (`532540`) or a common short-form (`SBI`, `L&T`, `HUL`, `RIL`) opens the stock straight away.
+- **Anything else** (a company name like `shriram`, or a typo like `relaince`) shows up to 8 likely NSE stocks as buttons, e.g. *SHRIRAMFIN · Shriram Finance Limited*. Click one to analyse it.
+- Nothing similar → a hint to try the company name.
 
-The best match is used straight away and shown above the results; when several companies match, a *"Not the right company?"* picker lets you switch.
+The stock list is NSE's full equity list from Dhan's public scrip master (no login or token), cached for a day. If it can't be downloaded, the app falls back to its earlier name search (Screener.in, then Yahoo Finance).
 
 ## Methodology
 

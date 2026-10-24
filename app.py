@@ -17,8 +17,8 @@ import streamlit as st
 from html import escape
 
 from data_sources import (
-    DataError, NotFoundError, fetch_company, fetch_fy_prices, fetch_yahoo_extras, looks_like_symbol,
-    resolve_company,
+    DataError, NotFoundError, alias_symbol, fetch_company, fetch_fy_prices, fetch_yahoo_extras, load_nse_equities,
+    looks_like_symbol, resolve_company, suggest_symbols,
 )
 from engine import (
     DE_LIMIT, MDSPORT_YEARS, MPTDS_MCAP_MIN, MPTDS_PARAMS, SENSITIVITY, SPORT_LABELS,
@@ -237,6 +237,29 @@ def load_prices(symbol: str, labels: tuple[str, ...]):
     return fetch_fy_prices(symbol, list(labels))
 
 
+class _NotCached(Exception):
+    """Raised inside a cached function so a failed download is retried next run, not cached for 24 h."""
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _nse_list_cached():
+    try:
+        df = load_nse_equities()
+    except Exception:
+        raise _NotCached(None)
+    if df is None or df.empty:
+        raise _NotCached(None)
+    return df
+
+
+def get_nse_list():
+    """NSE equity symbols + names (Dhan's public scrip master), or None when it can't be downloaded."""
+    try:
+        return _nse_list_cached()
+    except _NotCached:
+        return None
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_extras(symbol: str):
     return fetch_yahoo_extras(symbol)
@@ -295,13 +318,19 @@ def render_sidebar() -> None:
 
 
 def render_form() -> dict | None:
+    # Fixed widget key: passing value= would give the box a new identity whenever the symbol changes, and Streamlit
+    # would then discard the next thing typed. A suggestion click sets _wc_input_pending, applied here before the
+    # widget exists (a widget's state can't be changed after it is drawn in the same run).
+    if "_wc_input_pending" in st.session_state:
+        st.session_state["wc_input"] = st.session_state.pop("_wc_input_pending")
+    st.session_state.setdefault("wc_input", st.session_state.get("last_symbol", "TCS"))
     with st.form("query_form"):
         c1, c2 = st.columns([1.6, 1])  # two rows of two: comfortable on tablets, stacks on phones
         c3, c4 = st.columns([1.6, 1])
-        symbol = c1.text_input("Company name or NSE symbol", value=st.session_state.get("last_symbol", "TCS"),
+        symbol = c1.text_input("Company name or NSE symbol", key="wc_input",
                                placeholder="e.g. Shriram Finance, asian paints, TCS",
-                               help="Type a ticker (TCS, SHRIRAMFIN) or just the company's name — "
-                                    "names are looked up automatically.").strip()
+                               help="An exact NSE symbol (any case, .NS allowed) or a BSE code opens straight away. "
+                                    "Anything else — a company name or a typo — shows a list of likely stocks.").strip()
         basis = c2.selectbox("Statements", ["Auto", "Consolidated", "Standalone"],
                              help="Auto = consolidated, falling back to standalone when consolidated is empty.")
         sens = c3.selectbox("MPTDS sensitivity", list(SENSITIVITY),
@@ -755,6 +784,41 @@ def render_footer() -> None:
     """)
 
 
+def resolve_symbol(text: str) -> str | None:
+    """Exact NSE symbol (any case, '.NS'/'.BO' allowed), BSE code or common short-form -> symbol.
+    Anything else shows the likely NSE stocks as buttons and returns None (same finder as the Forward Matrix).
+    Returns "" when the NSE list can't be downloaded, so the caller falls back to the name search."""
+    q = text.strip().upper()
+    for suffix in (".NS", ".BO"):
+        if q.endswith(suffix):
+            q = q[: -len(suffix)]
+    if q.isdigit():
+        return q                                   # BSE code: Screener accepts it directly
+    alias = alias_symbol(q)
+    nse = get_nse_list()
+    if nse is None:
+        return ""
+    symbols = set(nse["SYMBOL"])
+    if q in symbols:
+        return q
+    if alias and alias in symbols:
+        return alias
+    opts = suggest_symbols(q, nse)
+    if opts:
+        st.warning(f"**“{text.strip()}”** is not an NSE symbol. Did you mean one of these?")
+        cols = st.columns(2)
+        for i, (sym_, nm_) in enumerate(opts):
+            if cols[i % 2].button(f"{sym_} · {nm_.title()}" if nm_ else sym_, key=f"sugg_{sym_}", width="stretch"):
+                st.session_state["query"]["symbol"] = sym_
+                st.session_state["last_symbol"] = sym_
+                st.session_state["_wc_input_pending"] = sym_   # show the chosen symbol in the box
+                st.rerun()
+    else:
+        st.warning(f"**“{text.strip()}”** is not an NSE symbol and nothing similar was found. "
+                   "Try the company name, e.g. *tata motors*.")
+    return None
+
+
 def find_company(text: str, basis: str):
     """Ticker first; if that isn't a Screener page (or the text is a name), search by name."""
     if looks_like_symbol(text):
@@ -810,7 +874,15 @@ def main() -> None:
         return
 
     try:
-        data = find_company(q["symbol"], q["basis"])
+        sym = resolve_symbol(q["symbol"])
+        if sym is None:                      # suggestions are on screen; wait for a pick
+            render_footer()
+            return
+        if sym:
+            with st.spinner(f"Fetching filings for {sym} from Screener.in…"):
+                data = load_company(sym, q["basis"])
+        else:                                # NSE list unavailable: previous name search
+            data = find_company(q["symbol"], q["basis"])
         if data is None:
             render_footer()
             return
