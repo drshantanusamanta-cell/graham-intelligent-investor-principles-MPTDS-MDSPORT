@@ -225,7 +225,9 @@ YAHOO_BS_ROWS = {
     "current_assets": ["Current Assets", "Total Current Assets"],
     "current_liabilities": ["Current Liabilities", "Total Current Liabilities"],
     "total_liabilities": ["Total Liabilities Net Minority Interest", "Total Liabilities"],
-    "long_term_debt": ["Long Term Debt", "Long Term Debt And Capital Lease Obligation"],
+    # Lease-inclusive row first: under Ind AS 116 non-current lease liabilities are fixed obligations
+    # (the current portion is already inside current liabilities). Plain debt is the fallback.
+    "long_term_debt": ["Long Term Debt And Capital Lease Obligation", "Long Term Debt"],
     "tangible_book": ["Tangible Book Value", "Net Tangible Assets"],
     "total_assets": ["Total Assets"],
 }

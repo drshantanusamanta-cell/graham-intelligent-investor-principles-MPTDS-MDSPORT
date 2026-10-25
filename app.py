@@ -25,9 +25,11 @@ from engine import (
     VALID_ABOVE, WATCHLIST_FROM, evaluate_mdsport, evaluate_mptds, period_end,
 )
 from graham import (
-    FAIL, NA, NO_DATA, PARTIAL, PASS, GrahamInputs, allocation_band, balance_from_sources, detect_financial,
-    evaluate_graham,
+    AMFI_MIDCAP_FLOOR, FAIL, NA, NO_DATA, PARTIAL, PASS, GrahamInputs, allocation_band, balance_from_sources,
+    detect_financial, evaluate_graham,
 )
+
+IIV_NAME = "Indian Intelligent Investor"   # Graham's screens adapted for NSE large and midcaps
 
 DEFAULT_GSEC = 7.20  # % — India 10Y G-Sec, late Sep 2026. Update it in Advanced options.
 
@@ -345,10 +347,11 @@ def render_form() -> dict | None:
             mid_min = a3.number_input("Mid-cap cut-off (₹ Cr)", min_value=0.0, value=5000.0, step=500.0,
                                       help="The framework only fixes the ₹10,000 Cr line; set mid/small to your own convention.")
 
-            st.markdown("**Graham inputs**")
+            st.markdown(f"**{IIV_NAME} inputs**")
             g1, g2, g3, g4 = st.columns(4)
             gsec = g1.number_input("10Y G-Sec yield %", min_value=0.5, max_value=20.0, value=DEFAULT_GSEC, step=0.05,
-                                   help="Y in Graham's growth formula and the earnings-yield comparison. "
+                                   help="Y for the earnings-yield comparison and the stock/bond band. "
+                                        "(The growth formula is the book's E × (8.5 + 2g) and doesn't use Y.) "
                                         "Update to today's yield.")
             spread = g2.number_input("AAA spread over G-Sec (bps)", min_value=0, max_value=500, value=0, step=5,
                                      help="Graham's Y was the AAA corporate yield. 0 uses the G-Sec yield directly, "
@@ -359,6 +362,18 @@ def render_form() -> dict | None:
             nifty_pe = g4.number_input("NIFTY 50 P/E (for allocation)", min_value=0.0, max_value=80.0, value=0.0,
                                        step=0.1, help="Optional. Used only for Graham's 25–75% stock/bond band. "
                                                       "0 = skip.")
+            h1, h2, h3 = st.columns(3)
+            graham_size = h1.number_input("Size cut-off: AMFI midcap floor (₹ Cr)", min_value=0.0,
+                                          value=float(AMFI_MIDCAP_FLOOR), step=500.0,
+                                          help="Market cap of the company ranked 250 in AMFI's list (₹34,700 Cr in "
+                                               "the Jan-2026 list). AMFI revises it every January and July.")
+            infl_floor = h2.checkbox("Inflation floor on earnings growth (optional)",
+                                     help="Test 5 then needs EPS growth ≥ the larger of Graham's ⅓ and the rise in "
+                                          "consumer prices (RBI CPI) between the same two 3-year windows. "
+                                          "Off = Graham's rule exactly.")
+            force_fin = h3.checkbox("Treat as bank / NBFC / insurer",
+                                    help="Use when the company is a lender or insurer that the app didn't detect. "
+                                         "Its balance-sheet and net-net tests then show N/A.")
             use_bs = st.checkbox("Enter current assets / liabilities manually (₹ Cr)",
                                  help="Use when Yahoo Finance has no balance sheet for this stock, or its basis "
                                       "differs from Screener's. Blank fields keep Yahoo's value.")
@@ -376,6 +391,7 @@ def render_form() -> dict | None:
             symbol=symbol, basis=basis, sens=sens, years=years,
             de_override=de_val if use_de else None, large_min=large_min, mid_min=mid_min,
             gsec=gsec, spread=spread, mos=mos / 100.0, nifty_pe=nifty_pe,
+            graham_size=graham_size, infl_floor=infl_floor, force_fin=force_fin,
             manual_bs=dict(current_assets=m_ca, current_liabilities=m_cl, total_liabilities=m_tl,
                            long_term_debt=m_ltd) if use_bs else None,
         )
@@ -643,11 +659,11 @@ def render_graham(g, price: float, q: dict) -> None:
         <div class="row"><span>Graham Number</span><b>₹{fmt_num(g.graham_number, 2)}</b></div>
         <div class="row"><span>Price vs Graham Number</span><b>{mos_txt(g.mos_graham_number)}</b></div>
         <div class="muted">The most a defensive investor should pay (P/E 15 × P/B 1.5).</div></div>
-      <div class="gate" style="--c:{C['violet']}"><h4>Growth formula EPS × (8.5 + 2g) × 4.4 ÷ Y</h4>
-        <div class="row"><span>EPS (latest FY) · g · Y</span><b>₹{fmt_num(g.eps_latest, 2)} · {fmt_num(g.growth_g * 100 if not math.isnan(g.growth_g) else np.nan, 1, '%')} · {fmt_num(g.bond_yield, 2, '%')}</b></div>
+      <div class="gate" style="--c:{C['violet']}"><h4>Growth formula V = EPS × (8.5 + 2g)</h4>
+        <div class="row"><span>EPS (latest FY) · g</span><b>₹{fmt_num(g.eps_latest, 2)} · {fmt_num(g.growth_g * 100 if not math.isnan(g.growth_g) else np.nan, 1, '%')}</b></div>
         <div class="row"><span>Value · buy line</span><b>₹{fmt_num(g.growth_value, 2)} · ₹{fmt_num(g.growth_buy, 2)}</b></div>
         <div class="row"><span>Price vs value</span><b>{mos_txt(g.mos_growth)}</b></div>
-        <div class="muted">g = CAGR of 3-yr average EPS over up to 10 yrs, capped at 15%. A rough heuristic, as Graham himself warned.</div></div>
+        <div class="muted">The Intelligent Investor, Ch. 11. g = CAGR of 3-yr average EPS over up to 10 yrs, capped at 15% (the cap is this app's, not Graham's). A rough heuristic, as Graham himself warned.</div></div>
     </div>
     """)
 
@@ -662,8 +678,32 @@ def render_graham(g, price: float, q: dict) -> None:
                    "used here (earnings yield ÷ bond yield below 1 → 25:75, 1–1.5 → 50:50, 1.5 or more → 75:25) "
                    "are this app's reading of his guidance, not figures from the book.")
 
+    with st.expander(f"{IIV_NAME}: what differs from Graham's rules, and why"):
+        st.markdown(iiv_adaptations_md())
+
     for n in g.notes:
         html(f'<div class="note">⚠️ {n}</div>')
+
+
+def iiv_adaptations_md() -> str:
+    """The Indian adaptations and the reason for each (shown in the tab and in the Method tab)."""
+    return f"""
+**Unchanged from the book.** Current ratio ≥ 2, debt ≤ net current assets, 10 years of profits, 20 years of
+dividends, EPS up ≥ ⅓, P/E ≤ 15, P/B ≤ 1.5 or P/E × P/B ≤ 22.5, all five enterprising tests, the Graham Number
+and net-net. Graham set his P/E 15 cap when US AAA corporate bonds yielded about 7.2% (July 1972); India's
+10-year AAA corporate yield was 7.49% in July 2026, so the bond-yield environment gives no reason to move it.
+
+| Change | Graham's rule | Here | Why |
+|---|---|---|---|
+| **Size** | Sales ≥ $100M (1971 dollars) | Market cap ≥ AMFI midcap floor (₹{AMFI_MIDCAP_FLOOR:,.0f} Cr, Jan-2026 list) | Graham's aim was to exclude small companies. His dollar figure doesn't translate to India, while AMFI's top-250 list is SEBI's official large/midcap definition. Difference: AMFI ranks by market value, Graham used sales. AMFI revises the floor every January and July. |
+| **Debt** | Long-term debt | Long-term debt **including non-current lease liabilities**, where Yahoo reports them | Since FY2019-20 Ind AS 116 puts leases on the balance sheet as fixed obligations. Only the non-current part is added; the current part already sits in current liabilities. |
+| **Banks / NBFCs / insurers** | Current ratio and debt tests | Financial-condition and net-net tests **N/A**; a pass shows as **DEFENSIVE PASS\\*** in amber | Bank (Banking Regulation Act format) and NBFC (Schedule III, Division III) balance sheets have no current/non-current split, so the ratios can't be computed. Graham gave no balance-sheet threshold for lenders, so none is invented; the \\* says financial strength was not assessed. Detected from Screener's financing labels or a Deposits row, or set manually under *Advanced options*. |
+| **Growth formula** | V = E × (8.5 + 2g), Ch. 11 | Same | The × 4.4 ÷ Y bond-yield version used earlier is a later revision that is not in *The Intelligent Investor*, so it was removed. The 15% cap on g is this app's practitioner limit, not Graham's. |
+| **Earnings growth (optional, off by default)** | EPS up ≥ ⅓ over 10 years | EPS up ≥ max(⅓, CPI floor) | Graham's ⅓ is nominal. The floor is the rise in consumer prices between the same two 3-year windows, so a company can't pass while its EPS shrank in real terms. CPI: RBI Handbook Table 236 (All-India Combined, financial-year averages). With this app's 12-year window, FY14–FY25 gives a floor of about +55%. FY2025-26 is approximate because RBI changed the CPI base mid-year. **This is an addition, not Graham's rule.** |
+
+**Not changed, still a limitation:** older EPS is not restated for bonus issues or splits; compare the growth
+test with the net-profit growth shown beside it.
+"""
 
 
 # ----------------------------------------------------------------------------
@@ -733,23 +773,25 @@ Each of P, T, D, S must be in a rising trend over 5–10 years: **Moderate** = a
 - Prices are never back-filled: a year with no trade near its year-end is left blank.
 - Banks and NBFCs don't report OPM/ROCE in the same way, so MDSPORT under-scores them by design.
 
-#### Graham — *The Intelligent Investor*
+#### {IIV_NAME} — Graham's *The Intelligent Investor*, adapted for NSE large and midcaps
 **Defensive investor (Ch. 14)** — all seven must pass:
-1. **Size** — market cap ≥ the large-cap cut-off (₹{MPTDS_MCAP_MIN:,.0f} Cr by default; Graham's 1971 dollar limits scaled).
-2. **Financial condition** — current ratio ≥ 2 and long-term debt ≤ net current assets.
+1. **Size** — market cap ≥ AMFI's midcap floor (₹{AMFI_MIDCAP_FLOOR:,.0f} Cr in the Jan-2026 list; Indian adaptation of Graham's 1971 dollar limit).
+2. **Financial condition** — current ratio ≥ 2 and long-term debt (including non-current lease liabilities where reported) ≤ net current assets.
 3. **Earnings stability** — positive earnings in each of the last 10 years.
 4. **Dividend record** — uninterrupted dividends for at least 20 years.
-5. **Earnings growth** — EPS up at least one-third over ~10 years, using 3-year averages at both ends.
+5. **Earnings growth** — EPS up at least one-third over ~10 years, using 3-year averages at both ends. *Optional:* at least the CPI rise between the same windows, if that is larger.
 6. **Moderate P/E** — price ≤ 15 × average EPS of the last 3 years.
 7. **Moderate P/B** — P/B ≤ 1.5, or P/E × P/B ≤ 22.5.
 
 **Enterprising investor (Ch. 15)** — current ratio ≥ 1.5 and debt ≤ 110% of net current assets; no loss in 5 years;
 some current dividend; latest EPS above the EPS of 5 years earlier; price below 120% of net tangible assets.
 
-**Valuation** — Graham Number √(22.5 × EPS × BVPS); growth formula EPS × (8.5 + 2g) × 4.4 ÷ Y (g capped at 15%,
-Y = 10Y G-Sec + optional AAA spread); net-net = price ≤ ⅔ of (current assets − total liabilities) per share.
+**Valuation** — Graham Number √(22.5 × EPS × BVPS); growth formula V = EPS × (8.5 + 2g) (Ch. 11; g capped at
+15% by this app); net-net = price ≤ ⅔ of (current assets − total liabilities) per share (not for banks/NBFCs).
+Y (10Y G-Sec + optional AAA spread) is used only for the earnings-yield comparison and the stock/bond band.
 
 **Verdict** — NET-NET BARGAIN or DEFENSIVE PASS → green; ENTERPRISING PASS → amber; otherwise FAILS GRAHAM.
+Banks/NBFCs/insurers: a pass shows as DEFENSIVE PASS\\* in amber, because Graham's balance-sheet test can't be run.
 **Short histories** — when a record is shorter than the test asks for, the years that exist are still analysed:
 - *Earnings stability* (10 / 5 yrs): no loss in ≥ 3 years available → **PARTIAL**; any loss → FAIL.
 - *Earnings growth* (10 yrs): growth over the years available (3-yr averages from 6 years, first vs last year
@@ -768,6 +810,8 @@ banks/NBFCs) are left out of the count.
 - Shares = market cap ÷ price. Screener's older EPS may not be restated for bonuses or splits — compare with
   the net-profit growth shown beside the growth test.
 """)
+    st.markdown(f"##### {IIV_NAME}: what differs from Graham's rules, and why")
+    st.markdown(iiv_adaptations_md())
 
 
 def render_footer() -> None:
@@ -907,8 +951,9 @@ def main() -> None:
         pnl=data.pnl, balance_sheet=data.balance_sheet, price=data.current_price, market_cap=data.market_cap,
         book_value_ps=getattr(data, "book_value", np.nan), bal=bal, dividends_fy=extras.get("dividends"),
         bond_yield=q.get("gsec", DEFAULT_GSEC) + q.get("spread", 0) / 100.0,
-        size_min=q.get("large_min", MPTDS_MCAP_MIN), mos_required=q.get("mos", 0.25),
-        is_financial=detect_financial(data.pnl),
+        size_min=q.get("graham_size", AMFI_MIDCAP_FLOOR), mos_required=q.get("mos", 0.25),
+        is_financial=detect_financial(data.pnl, data.balance_sheet) or bool(q.get("force_fin", False)),
+        inflation_floor=bool(q.get("infl_floor", False)),
     ))
     gr.notes = bal_notes + gr.notes
 
@@ -926,7 +971,7 @@ def main() -> None:
         f"{passed} of 5 gates passed · {q['sens']} sensitivity", gate_pills,
     )
     gr_card = verdict_card(
-        "Graham · Intelligent Investor", gr.verdict, gr.headline, gr.reason,
+        f"{IIV_NAME} · Graham", gr.verdict, gr.headline, gr.reason,
         [f"Defensive {gr.def_pass}/{gr.def_applicable}", f"Enterprising {gr.ent_pass}/{gr.ent_applicable}",
          f"Graham No. ₹{fmt_num(gr.graham_number, 0)}"],
     )
@@ -934,7 +979,7 @@ def main() -> None:
     if prices.isna().all():
         html('<div class="note">⚠️ Yahoo Finance returned no prices for this symbol, so the MPTDS Price trend cannot pass.</div>')
 
-    t1, t2, t5, t3, t4 = st.tabs(["🎯 MDSPORT", "📈 MPTDS", "🧮 Graham", "📋 Data", "📘 Method"])
+    t1, t2, t5, t3, t4 = st.tabs(["🎯 MDSPORT", "📈 MPTDS", f"🧮 {IIV_NAME}", "📋 Data", "📘 Method"])
     with t1:
         render_mdsport(mds)
     with t2:

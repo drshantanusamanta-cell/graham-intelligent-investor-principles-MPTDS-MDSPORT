@@ -8,7 +8,7 @@ A Streamlit app that screens NSE/BSE companies with two complementary frameworks
 |---|---|---|
 | **MDSPORT** | Is this a high-quality, growing, low-debt business? | Score /100 → VALID · WATCHLIST · REJECTED |
 | **MPTDS** | Are price, tax, dividend and sales in a sustained uptrend? | VALID · INVALID |
-| **Graham** | Does it pass Benjamin Graham's defensive / enterprising screens, and is it cheap on his formulas? | NET-NET · DEFENSIVE PASS · ENTERPRISING PASS · FAILS GRAHAM |
+| **Indian Intelligent Investor** | Does it pass Benjamin Graham's defensive / enterprising screens (adapted for NSE large and midcaps), and is it cheap on his formulas? | NET-NET · DEFENSIVE PASS · ENTERPRISING PASS · FAILS GRAHAM |
 
 ## Finding a company
 The search box works the same way as the Forward Matrix and Fair Value apps:
@@ -37,11 +37,14 @@ The stock list is NSE's full equity list from Dhan's public scrip master (no log
 - P, T, D and S must each show a rising trend over 5–10 years: **Moderate** = average YoY growth ≥ 5% and R² ≥ 0.25; **Strict** = ≥ 10% and R² ≥ 0.55.
 - **VALID** only when M and all four trends pass.
 
-### Graham (*The Intelligent Investor*)
-- **Defensive (Ch. 14), all 7 must pass:** size; current ratio ≥ 2 and long-term debt ≤ net current assets; positive earnings for 10 years; 20 years of unbroken dividends; EPS up ≥ ⅓ over 10 years (3-year averages); P/E ≤ 15 on 3-year average EPS; P/B ≤ 1.5 or P/E × P/B ≤ 22.5.
+### Indian Intelligent Investor (Graham's *The Intelligent Investor*, adapted for NSE)
+- **Defensive (Ch. 14), all 7 must pass:** size (market cap ≥ AMFI midcap floor, ₹34,700 Cr in the Jan-2026 list); current ratio ≥ 2 and long-term debt (including non-current lease liabilities where Yahoo reports them) ≤ net current assets; positive earnings for 10 years; 20 years of unbroken dividends; EPS up ≥ ⅓ over 10 years (3-year averages); P/E ≤ 15 on 3-year average EPS; P/B ≤ 1.5 or P/E × P/B ≤ 22.5.
+- **Optional inflation floor (off by default):** test 5 then needs EPS growth ≥ max(⅓, CPI rise between the same two 3-year windows), using RBI Handbook Table 236 CPI by financial year. An addition, not Graham's rule.
 - **Enterprising (Ch. 15):** current ratio ≥ 1.5 and debt ≤ 110% of net current assets; no loss in 5 years; some current dividend; EPS above 5 years ago; price < 120% of net tangible assets.
-- **Valuation:** Graham Number √(22.5 × EPS × BVPS); growth formula EPS × (8.5 + 2g) × 4.4 ÷ Y (g capped at 15%, Y = 10Y G-Sec + optional AAA spread); net-net = price ≤ ⅔ of NCAV per share; earnings yield vs Y; optional 25–75% stock/bond band from the NIFTY P/E.
-- Tests with too little history show **NO DATA** and never count as a pass. Current-ratio and NCAV tests are **N/A** for banks/NBFCs.
+- **Valuation:** Graham Number √(22.5 × EPS × BVPS); growth formula V = EPS × (8.5 + 2g) (Ch. 11; g capped at 15% by this app); net-net = price ≤ ⅔ of NCAV per share; earnings yield vs Y (10Y G-Sec + optional AAA spread); optional 25–75% stock/bond band from the NIFTY P/E.
+- Tests with too little history show **NO DATA** and never count as a pass.
+- **Banks / NBFCs / insurers:** financial-condition and net-net tests are **N/A** (no current/non-current split). A pass shows as **DEFENSIVE PASS\*** in amber because Graham's balance-sheet test couldn't be run. Detected from Screener's financing labels or a Deposits row, or set manually under *Advanced options*.
+- Each change from Graham's rules, and the reason for it, is shown in the app's Indian Intelligent Investor tab and Method tab.
 - Data: EPS, payout and book value from Screener; latest balance sheet (current assets/liabilities, total liabilities, long-term debt, tangible book) and dividend history from Yahoo Finance. A >35% gap between Yahoo's and Screener's total assets is flagged. Balance-sheet figures can be entered manually under *Advanced options*.
 
 ### Implementation notes

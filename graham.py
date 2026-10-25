@@ -1,14 +1,25 @@
 """
-Benjamin Graham layer (The Intelligent Investor) for the Wealthcon Investment Scorer.
+Indian Intelligent Investor layer: Benjamin Graham (The Intelligent Investor) adapted for NSE
+large and midcaps, for the Wealthcon Investment Scorer.
 
 Pure functions only (no network, no Streamlit), like engine.py.
 
+Indian adaptations (Graham's own thresholds are unchanged; the reasons are shown in the app):
+    - Size uses the AMFI midcap floor (rank <= 250) instead of Graham's 1971 dollar sales limit.
+    - Long-term debt includes non-current lease liabilities (Ind AS 116) where Yahoo reports them.
+    - Banks / NBFCs / insurers: financial-condition and net-net tests are N/A, and a pass is
+      marked "*" and kept amber because Graham's balance-sheet test could not be run.
+    - Growth formula is the book's Chapter 11 form, V = E x (8.5 + 2g).
+    - Optional (off by default): test 5 requires EPS growth >= max(1/3, CPI floor), where the
+      CPI floor is the rise in consumer prices between the same two 3-year windows.
+
 Defensive investor (Ch. 14) - seven tests
-    1 Size              market cap >= cut-off (the app's large-cap line, Rs 10,000 Cr by default)
+    1 Size              market cap >= AMFI midcap floor (Rs 34,700 Cr, Jan-2026 list, by default)
     2 Financial cond.   current ratio >= 2  AND  long-term debt <= net current assets
     3 Earnings stab.    positive earnings in each of the last 10 years
     4 Dividend record   uninterrupted dividends for at least 20 years
     5 Earnings growth   EPS up >= one-third over ~10 years, 3-year averages at both ends
+                        (optional: >= max(1/3, CPI floor))
     6 Moderate P/E      price <= 15 x average EPS of the last 3 years
     7 Moderate P/B      P/B <= 1.5, or P/E x P/B <= 22.5
 
@@ -21,8 +32,9 @@ Enterprising investor (Ch. 15) - five tests
 
 Valuation
     Graham Number      sqrt(22.5 x EPS(3-yr avg) x BVPS)  - the most a defensive investor pays
-    Growth formula     EPS x (8.5 + 2g) x 4.4 / Y         - revised 1974 form, Y = AAA-type yield
+    Growth formula     EPS x (8.5 + 2g)                   - The Intelligent Investor, Ch. 11
     NCAV (net-net)     current assets - total liabilities; buy at <= 2/3 of NCAV per share
+                       (not applicable to banks / NBFCs)
     Earnings yield     EPS(3-yr avg) / price, compared with Y
 
 Every test reports PASS, FAIL, NO DATA (history too short or field missing) or N/A
@@ -59,6 +71,27 @@ ENT_NTA_MAX = 1.20
 
 GROWTH_CAP = 0.15          # practitioner cap on g in the growth formula (not Graham's own rule)
 NET_NET_FRACTION = 2 / 3
+
+# ----------------------------------------------------------------------------
+# Indian adaptations
+# ----------------------------------------------------------------------------
+# Size: AMFI's midcap floor = market cap of the company ranked 250. Jan-2026 list (valid Feb-Jul 2026).
+# AMFI revises it every January and July; update it in the app's Advanced options.
+AMFI_MIDCAP_FLOOR = 34_700.0     # Rs crore
+
+# Optional inflation floor for test 5. Annual CPI inflation (%), All-India Combined, average of
+# months, by financial year (label = FY end). Source: RBI Handbook of Statistics on Indian Economy,
+# Table 236 (published 31 Jul 2026), from NSO/MoSPI. Base 2012=100 up to FY2024-25.
+CPI_FY_PCT = {
+    "Mar 2013": 9.9, "Mar 2014": 9.4, "Mar 2015": 5.9, "Mar 2016": 4.9, "Mar 2017": 4.5,
+    "Mar 2018": 3.6, "Mar 2019": 3.4, "Mar 2020": 4.8, "Mar 2021": 6.2, "Mar 2022": 5.5,
+    "Mar 2023": 6.7, "Mar 2024": 5.4, "Mar 2025": 4.6,
+    # FY2025-26 APPROXIMATION: RBI gives 1.7% for Apr-Dec 2025 (2012 base) and 3.1% for Jan-Mar 2026
+    # (new 2024 base) but no full-year figure. Time-weighted (9 x 1.7 + 3 x 3.1) / 12 = 2.05%.
+    # The two bases are not chain-linked, so treat this year as approximate.
+    "Mar 2026": 2.05,
+}
+CPI_APPROX_LABELS = {"Mar 2026"}
 
 PASS, FAIL, NO_DATA, NA = "PASS", "FAIL", "NO DATA", "N/A"
 PARTIAL = "PARTIAL"        # clean on the years available, but history shorter than Graham's rule
@@ -105,9 +138,10 @@ class GrahamInputs:
     bal: BalanceItems
     dividends_fy: pd.Series           # FY label -> dividend per share (Yahoo), may be empty
     bond_yield: float                 # % (10Y G-Sec + spread)
-    size_min: float = 10_000.0        # Rs crore
+    size_min: float = AMFI_MIDCAP_FLOOR   # Rs crore
     mos_required: float = 0.25        # fraction
     is_financial: bool = False
+    inflation_floor: bool = False     # optional CPI floor on test 5 (off = Graham's 1/3 only)
 
 
 @dataclass
@@ -163,10 +197,15 @@ def eps_series(pnl: pd.DataFrame) -> pd.Series:
     return pd.Series(np.nan, index=pnl.index, dtype=float)
 
 
-def detect_financial(pnl: pd.DataFrame) -> bool:
-    """Screener labels banks/NBFCs with 'Financing Profit' / 'Financing Margin %' instead of OPM."""
+def detect_financial(pnl: pd.DataFrame, bs: pd.DataFrame | None = None) -> bool:
+    """Screener labels banks/NBFCs with 'Financing Profit' / 'Financing Margin %' instead of OPM.
+    A 'Deposits' row in the balance sheet also marks a bank. Insurers and other financials may carry
+    neither label, so the app also offers a manual 'treat as financial' switch."""
     cols = set(pnl.columns) if pnl is not None else set()
-    return bool({"Financing Profit", "Financing Margin %"} & cols)
+    if {"Financing Profit", "Financing Margin %"} & cols:
+        return True
+    bs_cols = set(bs.columns) if bs is not None and not bs.empty else set()
+    return "Deposits" in bs_cols
 
 
 def shares_crore(price: float, market_cap: float) -> float:
@@ -259,6 +298,8 @@ def evaluate_graham(g: GrahamInputs) -> GrahamResult:
     cr = ca / cl if not _nan(ca) and not _nan(cl) and cl > 0 else np.nan
     nca = ca - cl if not _nan(ca) and not _nan(cl) else np.nan
     ncav = ca - tl if not _nan(ca) and not _nan(tl) else np.nan
+    if fin:
+        ncav = np.nan   # lenders have no current/non-current split, so NCAV (net-net) is not applicable
     ncav_ps = ncav / sh if not _nan(ncav) and not _nan(sh) and sh > 0 else np.nan
     ntav_ps = bal.tangible_book / sh if not _nan(bal.tangible_book) and not _nan(sh) and sh > 0 else np.nan
     if _nan(ntav_ps) and not _nan(bvps):
@@ -277,7 +318,8 @@ def evaluate_graham(g: GrahamInputs) -> GrahamResult:
     d: list[Check] = []
     d.append(Check("size", "Size", f"Market cap ≥ ₹{g.size_min:,.0f} Cr", f"₹{fmt(g.market_cap, 0)} Cr",
                    _status_min(g.market_cap, g.size_min),
-                   "Graham's 1971 dollar limits scaled to the app's large-cap cut-off."))
+                   "Indian adaptation: Graham's 1971 dollar sales limit replaced by AMFI's midcap floor "
+                   "(the company ranked 250 by market cap)."))
 
     if fin:
         d.append(Check("fin", "Financial condition", "Current ratio ≥ 2 · LT debt ≤ net current assets",
@@ -295,8 +337,10 @@ def evaluate_graham(g: GrahamInputs) -> GrahamResult:
 
     d.append(_dividend_check(g.dividends_fy, payout))
 
-    s, v, note = _ten_year_growth(eps, profit)
-    d.append(Check("growth", "Earnings growth", "EPS up ≥ ⅓ over 10 yrs (3-yr averages)", v, s, note))
+    s, v, note = _ten_year_growth(eps, profit, g.inflation_floor)
+    growth_rule = ("EPS up ≥ max(⅓, CPI floor) over 10 yrs (3-yr averages)" if g.inflation_floor
+                   else "EPS up ≥ ⅓ over 10 yrs (3-yr averages)")
+    d.append(Check("growth", "Earnings growth", growth_rule, v, s, note))
 
     d.append(Check("pe", "Moderate P/E", "Price ≤ 15 × avg EPS of last 3 yrs", f"P/E(3y) {fmt(pe_avg3, 1)}",
                    NO_DATA if _nan(pe_avg3) else (PASS if pe_avg3 <= DEF_PE_MAX else FAIL),
@@ -351,8 +395,10 @@ def evaluate_graham(g: GrahamInputs) -> GrahamResult:
     gn = math.sqrt(22.5 * eps_avg3 * bvps) if not _nan(eps_avg3) and not _nan(bvps) and eps_avg3 > 0 and bvps > 0 else np.nan
     growth_g = _growth_rate(eps)
     y = _num(g.bond_yield)
-    if not _nan(eps_latest) and eps_latest > 0 and not _nan(y) and y > 0 and not _nan(growth_g):
-        gv = eps_latest * (8.5 + 2 * growth_g * 100) * 4.4 / y
+    # The Intelligent Investor, Ch. 11: V = E x (8.5 + 2g), g in % a year. (The x 4.4 / Y bond-yield
+    # adjustment is a later revision that is not in the book, so it is not used here.)
+    if not _nan(eps_latest) and eps_latest > 0 and not _nan(growth_g):
+        gv = eps_latest * (8.5 + 2 * growth_g * 100)
     else:
         gv = np.nan
     growth_buy = gv * (1 - g.mos_required) if not _nan(gv) else np.nan
@@ -377,12 +423,20 @@ def evaluate_graham(g: GrahamInputs) -> GrahamResult:
     if is_net_net:
         verdict, headline = "VALID", "NET-NET BARGAIN"
         reason = f"Price ₹{fmt(price, 2)} ≤ ⅔ of NCAV (₹{fmt(net_net_buy, 2)})"
+    elif def_all and fin:
+        # A lender can't be checked on Graham's balance-sheet test, so "all passed" covers only the
+        # applicable tests: shown with "*" and kept amber rather than green.
+        verdict, headline = "WATCHLIST", "DEFENSIVE PASS*"
+        reason = (f"All {def_app} applicable defensive tests passed · *financial strength not assessed "
+                  "(bank/NBFC: Graham's balance-sheet test can't be computed)")
     elif def_all:
         verdict, headline = "VALID", "DEFENSIVE PASS"
         reason = f"All {def_app} defensive tests passed"
     elif ent_all:
-        verdict, headline = "WATCHLIST", "ENTERPRISING PASS"
+        verdict, headline = "WATCHLIST", "ENTERPRISING PASS" + ("*" if fin else "")
         reason = f"Defensive {def_pass}/{def_app} · all {ent_app} enterprising tests passed"
+        if fin:
+            reason += " · *financial strength not assessed (bank/NBFC)"
     else:
         verdict, headline = "REJECTED", "FAILS GRAHAM"
         reason = f"Defensive {def_pass}/{def_app} · Enterprising {ent_pass}/{ent_app}"
@@ -512,13 +566,48 @@ def _short_growth(window: pd.Series, profit: pd.Series) -> tuple[str, str, str]:
     return FAIL, value, f"{short} Below {need}. {how}.{np_txt}"
 
 
-def _ten_year_growth(eps: pd.Series, profit: pd.Series) -> tuple[str, str, str]:
+def cpi_floor(labels) -> tuple[float, str, bool]:
+    """Optional inflation floor for test 5 (an Indian adaptation, not Graham's rule).
+
+    Builds a CPI index over the same financial years as the EPS window (index = 1 at the first year,
+    then compounded with each later year's annual-average CPI inflation from CPI_FY_PCT) and returns
+    avg index of the last 3 years / avg index of the first 3 years, i.e. the rise in consumer prices
+    between the two 3-year windows that Graham compares.
+    Returns (floor ratio or NaN, explanation, uses_approximate_year)."""
+    labs = [str(x) for x in labels]
+    if len(labs) < 6:
+        return np.nan, "window too short for two 3-year averages", False
+    years = []
+    for lab in labs:
+        mon, _, yr = lab.partition(" ")
+        if mon != "Mar" or not yr.isdigit():
+            return np.nan, f"year-end {lab} is not March, so the RBI financial-year CPI series doesn't line up", False
+        years.append(int(yr))
+    if any(b - a != 1 for a, b in zip(years, years[1:])):
+        return np.nan, "the EPS record has a gap year, so the CPI years can't be matched", False
+    level, idx = 1.0, [1.0]
+    for lab in labs[1:]:
+        r = CPI_FY_PCT.get(lab)
+        if r is None:
+            return np.nan, f"no CPI figure stored for FY ending {lab}", False
+        level *= 1 + r / 100
+        idx.append(level)
+    floor = float(np.mean(idx[-3:]) / np.mean(idx[:3]))
+    approx = any(lab in CPI_APPROX_LABELS for lab in labs[1:])
+    return floor, f"CPI {labs[0]}–{labs[2]} → {labs[-3]}–{labs[-1]}", approx
+
+
+def _ten_year_growth(eps: pd.Series, profit: pd.Series, use_floor: bool = False) -> tuple[str, str, str]:
     """Graham: at least one-third growth in EPS over ten years, using 3-year averages at each end.
     Uses up to the last 12 FYs (so the averages are centred ~10 years apart); needs at least 10,
-    otherwise the shorter record is assessed against Graham's yearly pace (PARTIAL / FAIL)."""
+    otherwise the shorter record is assessed against Graham's yearly pace (PARTIAL / FAIL).
+    use_floor (optional Indian adaptation): the bar becomes max(1/3, CPI floor) for the same years."""
     window = eps.tail(12)
     if len(window) < DEF_STABLE_YEARS:
-        return _short_growth(window, profit)
+        status, value, note = _short_growth(window, profit)
+        if use_floor:
+            note += " (Inflation floor applies only when the full 10-year record exists.)"
+        return status, value, note
     start, end = float(window.head(3).mean()), float(window.tail(3).mean())
     np_txt = ""
     pw = profit.reindex(window.index).dropna()
@@ -531,7 +620,19 @@ def _ten_year_growth(eps: pd.Series, profit: pd.Series) -> tuple[str, str, str]:
         return FAIL, f"EPS avg {fmt(start, 1)} → {fmt(end, 1)}", \
             f"Starting average ≤ 0, so one-third growth can't be shown. {span}. {np_txt}".strip()
     growth = end / start - 1
-    return (PASS if growth >= DEF_GROWTH_MIN else FAIL), f"{growth * 100:+.0f}%", f"{span}. {np_txt}".strip()
+    need = DEF_GROWTH_MIN
+    floor_txt = ""
+    if use_floor:
+        fl, how, approx = cpi_floor(window.index)
+        if _nan(fl):
+            floor_txt = f" Inflation floor not applied: {how}; Graham's ⅓ used."
+        else:
+            need = max(DEF_GROWTH_MIN, fl - 1)
+            floor_txt = (f" Inflation floor: consumer prices rose {(fl - 1) * 100:+.0f}% ({how}, RBI CPI); "
+                         f"bar = {need * 100:+.0f}%.")
+            if approx:
+                floor_txt += " FY2025-26 CPI is approximate (RBI base change)."
+    return (PASS if growth >= need else FAIL), f"{growth * 100:+.0f}%", f"{span}. {np_txt}{floor_txt}".strip()
 
 
 def _growth_rate(eps: pd.Series) -> float:
